@@ -6,7 +6,9 @@ import requests
 
 
 class ApplyActionSpectra:
-    """Apply CIE photopic V(lambda) and CIE S 026 alpha-opic action spectra."""
+    """
+    Apply CIE sensitivity curves "S", "M", "L", "Rod", and "Mel".
+    """
 
     KM = 683.0
 
