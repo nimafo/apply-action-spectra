@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 import requests
 
-
 class ApplyActionSpectra:
     """
     Apply CIE sensitivity curves "S", "M", "L", "Rod", and "Mel".
+    Accepts a single spectrum (n_wl,) or multiple spectra (n_spectra, n_wl).
     """
 
     KM = 683.0
@@ -23,10 +23,14 @@ class ApplyActionSpectra:
     def __init__(self, irradiance, wavelengths):
         self.irradiance = np.asarray(irradiance, dtype=float)
 
+        if self.irradiance.ndim not in (1, 2):
+            raise ValueError("irradiance must be 1D (n_wl,) or 2D (n_spectra, n_wl).")
+
+        self.single = self.irradiance.ndim == 1
+        n_wl = self.irradiance.shape[-1]
+
         if isinstance(wavelengths, tuple) and len(wavelengths) == 2:
-            wavelengths = np.linspace(
-                wavelengths[0], wavelengths[1], len(self.irradiance)
-            )
+            wavelengths = np.linspace(wavelengths[0], wavelengths[1], n_wl)
         elif not isinstance(wavelengths, (list, np.ndarray)):
             raise ValueError(
                 "wavelengths must be a tuple (min, max) or a list/array."
@@ -34,8 +38,10 @@ class ApplyActionSpectra:
 
         self.wavelengths = np.asarray(wavelengths, dtype=float)
 
-        if self.wavelengths.shape != self.irradiance.shape:
-            raise ValueError("wavelengths and irradiance must have the same shape.")
+        if self.wavelengths.ndim != 1 or self.wavelengths.shape[0] != n_wl:
+            raise ValueError(
+                "wavelengths must be 1D with length equal to irradiance.shape[-1]."
+            )
         if np.any(np.diff(self.wavelengths) <= 0):
             raise ValueError("wavelengths must be strictly increasing.")
 
@@ -89,31 +95,50 @@ class ApplyActionSpectra:
 
         wl_a = self.aopic_df["wavelength_nm"].to_numpy(dtype=float)
 
+        weights = []
         for key, col in self.AOPIC_COLS.items():
             if col not in self.aopic_df.columns:
                 raise KeyError(f"Action spectra CSV missing '{col}'.")
             values = self.aopic_df[col].to_numpy(dtype=float)
-            setattr(
-                self,
-                f"s_{key}",
-                np.interp(wl_user, wl_a, values, left=0.0, right=0.0),
-            )
+            w = np.interp(wl_user, wl_a, values, left=0.0, right=0.0)
+            setattr(self, f"s_{key}", w)
+            weights.append(w)
 
-    @staticmethod
-    def _trapz_nm(y, x_nm):
-        return np.trapezoid(y, x_nm)
+        # (n_curves, n_wl): order = S, M, L, Rod, Mel
+        self.aopic_weights = np.vstack(weights)
 
     def _integrate(self):
-        Ee = self.irradiance
+        Ee = np.atleast_2d(self.irradiance)  # (n_spectra, n_wl)
         wl = self.wavelengths
 
-        self.photopic = self.KM * self._trapz_nm(Ee * self.V_lambda, wl)
+        # (n_spectra,)
+        photopic = self.KM * np.trapezoid(Ee * self.V_lambda, wl, axis=-1)
 
-        self.S_irradiance = self._trapz_nm(Ee * self.s_S, wl)
-        self.M_irradiance = self._trapz_nm(Ee * self.s_M, wl)
-        self.L_irradiance = self._trapz_nm(Ee * self.s_L, wl)
-        self.rod_irradiance = self._trapz_nm(Ee * self.s_Rod, wl)
-        self.mel_irradiance = self._trapz_nm(Ee * self.s_Mel, wl)
+        # (n_spectra, n_curves)
+        aopic_irr = np.trapezoid(
+            Ee[:, None, :] * self.aopic_weights[None, :, :], wl, axis=-1
+        )
+
+        S_irr, M_irr, L_irr, rod_irr, mel_irr = aopic_irr.T
+
+        mp = np.divide(
+            self.KM * mel_irr,
+            photopic,
+            out=np.zeros_like(photopic),
+            where=photopic != 0,
+        )
+
+        def _sq(x):
+            return x[0] if self.single else x
+
+        self.photopic = _sq(photopic)
+        self.aopic_irradiance = aopic_irr[0] if self.single else aopic_irr
+
+        self.S_irradiance = _sq(S_irr)
+        self.M_irradiance = _sq(M_irr)
+        self.L_irradiance = _sq(L_irr)
+        self.rod_irradiance = _sq(rod_irr)
+        self.mel_irradiance = _sq(mel_irr)
 
         self.S_lux = self.KM * self.S_irradiance
         self.M_lux = self.KM * self.M_irradiance
@@ -121,25 +146,44 @@ class ApplyActionSpectra:
         self.rod_lux = self.KM * self.rod_irradiance
         self.mEDI = self.KM * self.mel_irradiance
 
-        self.MP_ratio = self.mEDI / self.photopic if self.photopic else 0.0
+        self.MP_ratio = _sq(mp)
+
+    def _out(self, x):
+        return float(x) if self.single else np.asarray(x)
 
     def summary(self) -> dict:
         return {
-            "photopic_lux": float(self.photopic),
-            "mEDI_lux_proxy": float(self.mEDI),
+            "photopic_lux": self._out(self.photopic),
+            "mEDI_lux_proxy": self._out(self.mEDI),
             "aopic_lux": {
-                "S": float(self.S_lux),
-                "M": float(self.M_lux),
-                "L": float(self.L_lux),
-                "Rod": float(self.rod_lux),
-                "Mel": float(self.mEDI),
+                "S": self._out(self.S_lux),
+                "M": self._out(self.M_lux),
+                "L": self._out(self.L_lux),
+                "Rod": self._out(self.rod_lux),
+                "Mel": self._out(self.mEDI),
             },
             "aopic_irradiance_Wm2": {
-                "S": float(self.S_irradiance),
-                "M": float(self.M_irradiance),
-                "L": float(self.L_irradiance),
-                "Rod": float(self.rod_irradiance),
-                "Mel": float(self.mel_irradiance),
+                "S": self._out(self.S_irradiance),
+                "M": self._out(self.M_irradiance),
+                "L": self._out(self.L_irradiance),
+                "Rod": self._out(self.rod_irradiance),
+                "Mel": self._out(self.mel_irradiance),
             },
-            "MP_ratio": float(self.MP_ratio),
+            "MP_ratio": self._out(self.MP_ratio),
         }
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            "photopic_lux": np.atleast_1d(self.photopic),
+            "S_lux": np.atleast_1d(self.S_lux),
+            "M_lux": np.atleast_1d(self.M_lux),
+            "L_lux": np.atleast_1d(self.L_lux),
+            "Rod_lux": np.atleast_1d(self.rod_lux),
+            "mEDI_lux_proxy": np.atleast_1d(self.mEDI),
+            "S_Wm2": np.atleast_1d(self.S_irradiance),
+            "M_Wm2": np.atleast_1d(self.M_irradiance),
+            "L_Wm2": np.atleast_1d(self.L_irradiance),
+            "Rod_Wm2": np.atleast_1d(self.rod_irradiance),
+            "Mel_Wm2": np.atleast_1d(self.mel_irradiance),
+            "MP_ratio": np.atleast_1d(self.MP_ratio),
+        })
