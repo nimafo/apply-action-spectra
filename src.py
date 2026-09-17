@@ -40,12 +40,12 @@ class ApplyActionSpectra:
             raise ValueError("wavelengths must be strictly increasing.")
 
         self.photopic_df = self._read_cie_csv_with_metadata(
-            "https://files.cie.co.at/CIE_sle_photopic.csv",
-            "https://files.cie.co.at/CIE_sle_photopic.csv_metadata.json",
+            "https://files.cie.co.at/Publications-datasets/CIE_sle_photopic.csv",
+            "https://files.cie.co.at/Publications-datasets/CIE_sle_photopic.csv_metadata.json",
         )
         self.aopic_df = self._read_cie_csv_with_metadata(
-            "https://files.cie.co.at/CIE_a-opic_action_spectra.csv",
-            "https://files.cie.co.at/CIE_a-opic_action_spectra.csv_metadata.json",
+            "https://files.cie.co.at/Publications-datasets/CIE_a-opic_action_spectra.csv",
+            "https://files.cie.co.at/Publications-datasets/CIE_a-opic_action_spectra.csv_metadata.json",
         )
 
         self._prepare_weights()
